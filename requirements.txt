@@ -1,0 +1,6 @@
+pytest
+pydantic
+pydantic-settings
+psycopg2-binary
+pymongo
+requests
