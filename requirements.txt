@@ -4,3 +4,5 @@ pydantic-settings
 psycopg2-binary
 pymongo
 requests
+thefuzz==0.22.1
+python-Levenshtein==0.25.1

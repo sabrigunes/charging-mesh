@@ -36,7 +36,7 @@ with DAG(
     schedule=[epdk_raw_dataset],  # <--- Birinci DAG bittiğinde tetiklenir!
     start_date=datetime(2026, 1, 1),
     catchup=False,
-    tags=['epdk', 'transform', 'postgres'],
+    tags=['epdk', 'transform'],
 ) as dag:
 
     transform_task = PythonOperator(

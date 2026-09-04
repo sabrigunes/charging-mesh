@@ -1,7 +1,9 @@
+import json
 import logging
 import urllib.parse
-import json
 import psycopg2
+from pymongo import MongoClient
+from thefuzz import process
 from src.config import settings
 from src.models.station import StationModel
 
@@ -13,7 +15,7 @@ class StationETLTransformer:
     def __init__(self):
         encoded_password = urllib.parse.quote_plus(settings.MONGO_PASSWORD)
         mongo_url = f"mongodb://{settings.MONGO_USER}:{encoded_password}@{settings.MONGO_HOST}:{settings.MONGO_PORT}/"
-
+        print(mongo_url)
         self.mongo_client = MongoClient(mongo_url)
         self.mongo_db = self.mongo_client["raw_data"]
         self.mongo_collection = self.mongo_db["charging"]
@@ -25,7 +27,124 @@ class StationETLTransformer:
             password=settings.DB_PASSWORD,
             port=settings.DB_PORT
         )
+
+        self.pg_conn_core = psycopg2.connect(
+            host=settings.DB_HOST_CORE,
+            database=settings.DB_NAME_CORE,
+            user=settings.DB_USER_CORE,
+            password=settings.DB_PASSWORD_CORE,
+            port=settings.DB_PORT_CORE
+        )
+
         self.pg_conn.autocommit = False
+
+        # Coğrafi verileri hızlı eşleme için önbelleğe alıyoruz
+        self.cache_geo_data()
+
+    def tr_upper(self, text: str) -> str:
+        """Türkçe karakter sorunsuz büyük harf dönüşümü."""
+        if not text:
+            return ""
+        return (
+            text.replace("i", "İ")
+            .replace("ı", "I")
+            .replace("ç", "Ç")
+            .replace("ş", "Ş")
+            .replace("ğ", "Ğ")
+            .replace("ü", "Ü")
+            .replace("ö", "Ö")
+            .upper()
+        )
+
+    def cache_geo_data(self):
+        """Veritabanındaki şehir, ilçe ve mahalleleri belleğe yükleyerek her satırda SQL sorgusu atılmasını önler."""
+        cursor = self.pg_conn_core.cursor()
+        try:
+            cursor.execute("SELECT id, name FROM public.cities")
+            self.cities_cache = {self.tr_upper(row[1]): row[0] for row in cursor.fetchall()}
+
+            cursor.execute("SELECT id, city_id, name FROM public.districts")
+            self.districts_cache = {}
+            for row in cursor.fetchall():
+                d_id, c_id, d_name = row[0], row[1], self.tr_upper(row[2])
+                if c_id not in self.districts_cache:
+                    self.districts_cache[c_id] = {}
+                self.districts_cache[c_id][d_name] = d_id
+
+            cursor.execute("SELECT id, district_id, name FROM public.neighborhoods")
+            self.neighborhoods_cache = {}
+            for row in cursor.fetchall():
+                n_id, d_id, n_name = row[0], row[1], self.tr_upper(row[2])
+                if d_id not in self.neighborhoods_cache:
+                    self.neighborhoods_cache[d_id] = {}
+                self.neighborhoods_cache[d_id][n_name] = n_id
+
+            logger.info("Coğrafi referans verileri (Şehir, İlçe, Mahalle) başarıyla belleğe yüklendi.")
+        except Exception as e:
+            logger.warning(f"Coğrafi veriler önbelleğe alınırken hata oluştu (Tablolar henüz olmayabilir): {e}")
+            self.cities_cache = {}
+            self.districts_cache = {}
+            self.neighborhoods_cache = {}
+        finally:
+            cursor.close()
+
+    def parse_address_geography(self, address: str):
+        """
+        Hiyerarşik Adres Çözümleme Algoritması (Güncellenmiş):
+        1. Adres metninin sonundaki şehir bilgisini (/ sonrasını) baz alarak şehri tespit et.
+        2. Bulunan şehre ait ilçeleri tarayarak adreste geçen ilçeyi bul.
+        3. Bulunan ilçeye ait mahalleleri tarayarak adreste geçen mahalleyi bul.
+        """
+        if not address:
+            return None, None, None
+ 
+        norm_address = self.tr_upper(address)
+        city_id, district_id, neighborhood_id = None, None, None
+        matched_city_name, matched_district_name, matched_neigh_name = None, None, None
+
+        # 1. Adım: Şehri Tespit Et (Önce son "/" karakterinden sonrasına bak)
+        if "/" in address:
+            last_part = norm_address.split("/")[-1].strip()
+            for c_name, c_id in self.cities_cache.items():
+                if c_name in last_part or last_part in c_name:
+                    city_id = c_id
+                    matched_city_name = c_name 
+                    break
+ 
+        if not city_id:
+            logger.info(f"[GEO] Şehir bulunamadı | Adres: {address}")
+            return None, None, None
+
+        # 2. Adım: Şehre ait ilçeleri al ve adreste geçen ilçeyi tespit et
+        district_map = self.districts_cache.get(city_id, {})
+        for d_name, d_id in district_map.items():
+            if d_name in norm_address:
+                district_id = d_id
+                matched_district_name = d_name
+                break
+
+        if not district_id:
+            logger.info(f"[GEO] İlçe bulunamadı | Şehir: {matched_city_name} | Adres: {address}")
+            return city_id, None, None
+
+        # 3. Adım: İlçeye ait mahalleleri al ve adreste geçen mahalleyi tespit et
+        neighborhood_map = self.neighborhoods_cache.get(district_id, {})
+        if neighborhood_map:
+            for n_name, n_id in neighborhood_map.items():
+                clean_n = n_name.replace(" MAHALLESİ", "").replace(" MAH.", "").strip()
+                if clean_n and clean_n in norm_address:
+                    neighborhood_id = n_id
+                    matched_neigh_name = n_name
+                    break
+
+            if not neighborhood_id:
+                choices = list(neighborhood_map.keys())
+                match_result = process.extractOne(norm_address, choices)
+                if match_result and match_result[1] >= 85:
+                    matched_neigh_name = match_result[0]
+                    neighborhood_id = neighborhood_map[matched_neigh_name]
+
+        return city_id, district_id, neighborhood_id
 
     def get_or_create_lookup(self, cursor, table_name, column_name, value):
         if not value:
@@ -63,7 +182,6 @@ class StationETLTransformer:
         return cursor.fetchone()[0]
 
     def transform_and_load(self):
-        from pymongo import MongoClient  
         cursor = self.pg_conn.cursor()
         total_processed = 0
 
@@ -73,13 +191,20 @@ class StationETLTransformer:
 
             for doc in cursor_mongo:
                 doc_id = doc["_id"]
-                if "data" not in doc:
-                    logger.warning(f"Belge formatı geçersiz (ID: {doc_id}), atlanıyor.")
-                    continue
 
-                stations_data = doc["data"]
-                logger.info(
-                    f"MongoDB belgesi işleniyor (ID: {doc_id}), içerisindeki kayıt sayısı: {len(stations_data)}")
+                # Esnek veri yapısı kontrolü ("data", "stations" veya direkt liste/belge)
+                stations_data = doc.get("data") or doc.get("stations") or (doc if isinstance(doc, list) else None)
+
+                if not stations_data:
+                    if isinstance(doc, dict) and len(doc) > 1:
+                        stations_data = [doc]
+                    else:
+                        logger.warning(f"Belge formatı geçersiz (ID: {doc_id}), atlanıyor.")
+                        continue
+
+                if isinstance(stations_data, dict):
+                    stations_data = [stations_data]
+
 
                 success_count = 0
 
@@ -107,22 +232,30 @@ class StationETLTransformer:
                             cursor, "ev_brands", "name", station_model.marka
                         )
 
+                        # Adres üzerinden Hiyerarşik Coğrafi ID'leri Çözümle (City, District, Neighborhood)
+                        city_id, district_id, neighborhood_id = self.parse_address_geography(station_model.adres)
+
                         station_num_str = "".join(filter(str.isdigit, station_model.station_no))
                         station_number = int(station_num_str) if station_num_str else index
 
-                        # 3. İstasyon Kaydı (ev_stations)
+                        # 3. İstasyon Kaydı (ev_stations - Coğrafi ID'ler eklendi)
                         cursor.execute("""
                                        INSERT INTO public.ev_stations (number, name, address, latitude, longitude,
                                                                        is_public, is_green, operator_id, brand_id,
-                                                                       electricity_company_id, dist_approval_no)
-                                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT ("number") DO
+                                                                       electricity_company_id, dist_approval_no,
+                                                                       city_id, district_id, neighborhood_id)
+                                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                               %s) ON CONFLICT ("number") DO
                                        UPDATE SET
                                            name = EXCLUDED.name,
                                            address = EXCLUDED.address,
                                            latitude = EXCLUDED.latitude,
                                            longitude = EXCLUDED.longitude,
                                            brand_id = EXCLUDED.brand_id,
-                                           electricity_company_id = EXCLUDED.electricity_company_id
+                                           electricity_company_id = EXCLUDED.electricity_company_id,
+                                           city_id = EXCLUDED.city_id,
+                                           district_id = EXCLUDED.district_id,
+                                           neighborhood_id = EXCLUDED.neighborhood_id
                                            RETURNING id;
                                        """, (
                                            station_number,
@@ -135,7 +268,10 @@ class StationETLTransformer:
                                            operator_id,
                                            brand_id,
                                            elec_company_id,
-                                           station_model.dagitim_sirketi_olumlu_gorus_belge_numarasi
+                                           station_model.dagitim_sirketi_olumlu_gorus_belge_numarasi,
+                                           city_id,
+                                           district_id,
+                                           neighborhood_id
                                        ))
 
                         station_db_id = cursor.fetchone()[0]
@@ -185,8 +321,6 @@ class StationETLTransformer:
 
                 if success_count > 0:
                     self.mongo_collection.delete_one({"_id": doc_id})
-                    logger.info(
-                        f"[BAŞARILI] Belge PostgreSQL'e aktarıldı ve MongoDB'den silindi. Document ID: {doc_id}")
                     total_processed += success_count
 
             logger.info(f"ETL Süreci Tamamlandı. Toplam aktarılan istasyon sayısı: {total_processed}")
