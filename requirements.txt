@@ -6,3 +6,6 @@ pymongo
 requests
 thefuzz==0.22.1
 python-Levenshtein==0.25.1
+fastapi
+uvicorn
+email-validator

@@ -64,13 +64,13 @@ def run_extraction_to_raw(**context):
 
 
 with DAG(
-        'epdk_extract_load_pipeline',
+        '01_charging_mesh_extractor',
         default_args=default_args,
         description='EPDK Ham Veri Çekme ve Kaydetme (Her 2 saatte bir)',
         schedule_interval='0 */2 * * *',
         start_date=datetime(2026, 1, 1),
         catchup=False,
-        tags=['epdk', 'extract', 'mongodb'],
+        tags=['charging_mesh','epdk', 'extract', 'load'],
 ) as dag:
     extract_load_task = PythonOperator(
         task_id='extract_and_load_raw_data',

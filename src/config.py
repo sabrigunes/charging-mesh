@@ -11,7 +11,7 @@ class Settings:
     DB_PORT: str = os.getenv("DB_PORT", "5432")
     DB_NAME: str = os.getenv("DB_NAME", "charging_db")
     DB_USER: str = os.getenv("DB_USER", "postgres_admin")
-    DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
+    DB_PASSWORD: str = os.getenv("DB_PASSWORD", "") 
 
     @property
     def DATABASE_URL(self) -> str:
@@ -20,7 +20,7 @@ class Settings:
     # Coğrafi Verilerin Olduğu Core Veritabanı (Genellikle aynı veya ayrı olabilir)
     DB_HOST_CORE: str = os.getenv("DB_HOST_CORE", os.getenv("DB_HOST", "localhost"))
     DB_PORT_CORE: str = os.getenv("DB_PORT_CORE", os.getenv("DB_PORT", "5432"))
-    DB_NAME_CORE: str = os.getenv("DB_NAME_CORE", os.getenv("DB_NAME", "charging_db"))
+    DB_NAME_CORE: str = os.getenv("DB_NAME_CORE", os.getenv("DB_NAME", "core_db"))
     DB_USER_CORE: str = os.getenv("DB_USER_CORE", os.getenv("DB_USER", "postgres_admin"))
     DB_PASSWORD_CORE: str = os.getenv("DB_PASSWORD_CORE", os.getenv("DB_PASSWORD", ""))
 

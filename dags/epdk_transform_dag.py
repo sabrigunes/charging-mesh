@@ -23,22 +23,23 @@ default_args = {
     'retry_delay': timedelta(minutes=5),
 }
 
+ 
 def run_transformation(**context):
     print("MongoDB'deki ham verileri işleme ve PostgreSQL'e aktarma (Transform & Load) süreci başlatılıyor...")
     transformer = StationETLTransformer()
     transformer.transform_and_load()
     print("Transform ve PostgreSQL aktarım süreci başarıyla tamamlandı.")
 
-with DAG(
-    'epdk_transform_pipeline',
-    default_args=default_args,
-    description='MongoDB Ham Verilerini PostgreSQL e Dönüştürme ve Yükleme',
-    schedule=[epdk_raw_dataset],  # <--- Birinci DAG bittiğinde tetiklenir!
-    start_date=datetime(2026, 1, 1),
-    catchup=False,
-    tags=['epdk', 'transform'],
-) as dag:
 
+with DAG(
+        '02_charging_mesh_transformer',
+        default_args=default_args,
+        description='MongoDB Ham Verilerini PostgreSQL e Dönüştürme ve Yükleme',
+        schedule=[epdk_raw_dataset],  # <--- Birinci DAG bittiğinde tetiklenir!
+        start_date=datetime(2026, 1, 1),
+        catchup=False,
+        tags=['charging_mesh','epdk', 'transform'],
+) as dag:
     transform_task = PythonOperator(
         task_id='transform_and_load_postgres',
         python_callable=run_transformation,
